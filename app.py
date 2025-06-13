@@ -27,14 +27,13 @@ def download_video():
         unique_id = str(uuid.uuid4())[:8]
         output_template = os.path.join(DOWNLOAD_FOLDER, f"{unique_id}-%(title)s.%(ext)s")
 
-ydl_opts = {
-    'outtmpl': output_template,
-    'format': 'bestvideo+bestaudio/best',
-    'merge_output_format': 'mp4',
-    'quiet': True,
-    'cookiefile': 'cookies.txt'
-}
-
+        ydl_opts = {
+            'outtmpl': output_template,
+            'format': 'bestvideo+bestaudio/best',
+            'merge_output_format': 'mp4',
+            'quiet': True,
+            'cookiefile': 'cookies.txt'  # You must upload this file manually
+        }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -52,3 +51,4 @@ ydl_opts = {
 @app.route("/static/downloads/<filename>")
 def serve_file(filename):
     return send_from_directory(DOWNLOAD_FOLDER, filename)
+
