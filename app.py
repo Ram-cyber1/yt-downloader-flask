@@ -32,7 +32,6 @@ def download_video():
             'format': 'bestvideo+bestaudio/best',
             'merge_output_format': 'mp4',
             'quiet': True,
-            'cookiefile': 'cookies.txt'  # You must upload this file manually
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
