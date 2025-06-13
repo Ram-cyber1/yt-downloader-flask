@@ -3,6 +3,8 @@ import os
 import yt_dlp
 import uuid
 import re
+import glob
+from datetime import datetime
 
 app = Flask(__name__)
 DOWNLOAD_FOLDER = os.path.join("static", "downloads")
@@ -10,6 +12,16 @@ os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", name)
+
+def clean_up_old_files(limit=2):
+    files = glob.glob(os.path.join(DOWNLOAD_FOLDER, "*"))
+    files = [f for f in files if os.path.isfile(f)]
+    if len(files) >= limit:
+        # Sort by creation time (oldest first)
+        files.sort(key=lambda x: os.path.getctime(x))
+        # Delete oldest files, keep only (limit-1)
+        for f in files[:len(files) - (limit - 1)]:
+            os.remove(f)
 
 @app.route("/")
 def home():
@@ -24,6 +36,9 @@ def download_video():
         return jsonify({"error": "No URL provided."}), 400
 
     try:
+        # Clean up old files before downloading new one
+        clean_up_old_files(limit=2)
+
         unique_id = str(uuid.uuid4())[:8]
         output_template = os.path.join(DOWNLOAD_FOLDER, f"{unique_id}-%(title)s.%(ext)s")
 
