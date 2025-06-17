@@ -15,10 +15,12 @@ import psutil
 
 from flask_cors import CORS
 
-# After app = Flask(__name__)
-CORS(app, origins=["*"])  # Or specify your domain
-
+# FIRST create the Flask app
 app = Flask(__name__)
+
+# THEN configure CORS  
+CORS(app, origins=["*"])
+
 DOWNLOAD_FOLDER = os.path.join("static", "downloads")
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
