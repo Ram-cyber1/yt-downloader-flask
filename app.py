@@ -293,27 +293,143 @@ def download_video():
             "error": f"Insufficient disk space: {disk_info['percent']:.1f}% used. Please try again later."
         }), 507
     
-    # Generate unique IDs
-    unique_id = str(uuid.uuid4())[:8]
-    download_id = str(uuid.uuid4())
-    
-    print(f"[API] Starting async download with ID: {download_id}")
-    
-    # Start async download
-    thread = threading.Thread(
-        target=download_video_async, 
-        args=(url, unique_id, download_id)
-    )
-    thread.daemon = True
-    thread.start()
-    
-    return jsonify({
-        "success": True,
-        "message": "Download started",
-        "download_id": download_id,
-        "status_url": f"{request.host_url}api/status/{download_id}",
-        "cleanup_performed": cleanup_result
-    })
+    try:
+        # First, try to get video info to determine if we should use sync or async
+        print("[API] Checking video info to determine download method...")
+        
+        ydl_opts_info = {
+            'quiet': True,
+            'no_warnings': True,
+            'socket_timeout': 10,
+            'retries': 1,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android'],
+                    'skip': ['dash', 'hls']
+                }
+            }
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+            info = ydl.extract_info(url, download=False)
+            duration = info.get('duration', 0)
+            title = info.get('title', 'video')
+            
+            print(f"[API] Video info: {title} - Duration: {duration}s")
+            
+            # If video is short (under 3 minutes), do sync download
+            if duration and duration <= 180:
+                print("[API] Short video detected, using sync download...")
+                return handle_sync_download(url, info, title, duration, cleanup_result)
+            else:
+                print("[API] Long video detected, using async download...")
+                return handle_async_download(url, info, title, duration, cleanup_result)
+                
+    except Exception as e:
+        print(f"[API] Error getting video info: {e}")
+        # If we can't get info, fall back to async
+        print("[API] Falling back to async download...")
+        return handle_async_download(url, None, None, None, cleanup_result)
+
+def handle_sync_download(url, info, title, duration, cleanup_result):
+    """Handle synchronous download for short videos"""
+    try:
+        print("[SYNC] Starting synchronous download...")
+        unique_id = str(uuid.uuid4())[:8]
+        
+        # Very restrictive options for sync download
+        ydl_opts = {
+            'format': 'worst[height<=360]/worst',  # Low quality for speed
+            'outtmpl': os.path.join(DOWNLOAD_FOLDER, f'{unique_id}_%(title)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'socket_timeout': 15,
+            'retries': 1,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android'],
+                    'skip': ['dash', 'hls']
+                }
+            },
+            'http_headers': {
+                'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip'
+            }
+        }
+        
+        # Add cookies if available
+        if os.path.exists('cookies.txt'):
+            ydl_opts['cookiefile'] = 'cookies.txt'
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            print(f"[SYNC] Downloading: {title}")
+            ydl.download([url])
+            
+            # Find downloaded file
+            pattern = os.path.join(DOWNLOAD_FOLDER, f"{unique_id}_*")
+            downloaded_files = glob.glob(pattern)
+            
+            if downloaded_files:
+                actual_file = downloaded_files[0]
+                actual_filename = os.path.basename(actual_file)
+                file_size = os.path.getsize(actual_file)
+                encoded_filename = urllib.parse.quote(actual_filename, safe='')
+                
+                print(f"[SYNC] Download completed: {actual_filename} ({file_size/(1024**2):.1f}MB)")
+                
+                # Return immediate download URL (what frontend expects)
+                return jsonify({
+                    "success": True,
+                    "message": "Video downloaded successfully!",
+                    "filename": actual_filename,
+                    "title": title,
+                    "file_size": file_size,
+                    "download_url": f"{request.host_url}static/downloads/{encoded_filename}",
+                    "method": "sync",
+                    "cleanup_performed": cleanup_result
+                })
+            else:
+                raise Exception("Download completed but file not found")
+                
+    except Exception as e:
+        print(f"[SYNC] Sync download failed: {e}")
+        # If sync fails, fall back to async
+        print("[SYNC] Falling back to async download...")
+        return handle_async_download(url, info, title, duration, cleanup_result)
+    finally:
+        gc.collect()
+
+def handle_async_download(url, info, title, duration, cleanup_result):
+    """Handle asynchronous download for long videos or when sync fails"""
+    try:
+        # Generate unique IDs
+        unique_id = str(uuid.uuid4())[:8]
+        download_id = str(uuid.uuid4())
+        
+        print(f"[ASYNC] Starting async download with ID: {download_id}")
+        
+        # Start async download
+        thread = threading.Thread(
+            target=download_video_async, 
+            args=(url, unique_id, download_id)
+        )
+        thread.daemon = True
+        thread.start()
+        
+        return jsonify({
+            "success": True,
+            "message": "Download started",
+            "download_id": download_id,
+            "status_url": f"{request.host_url}api/status/{download_id}",
+            "method": "async",
+            "title": title,
+            "duration": duration,
+            "cleanup_performed": cleanup_result
+        })
+        
+    except Exception as e:
+        print(f"[ASYNC] Failed to start async download: {e}")
+        return jsonify({"error": f"Failed to start download: {str(e)}"}), 500
+
 
 @app.route("/api/status/<download_id>", methods=["GET"])
 def get_download_status(download_id):
