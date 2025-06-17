@@ -13,6 +13,11 @@ import sys
 import gc
 import psutil
 
+from flask_cors import CORS
+
+# After app = Flask(__name__)
+CORS(app, origins=["*"])  # Or specify your domain
+
 app = Flask(__name__)
 DOWNLOAD_FOLDER = os.path.join("static", "downloads")
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
@@ -415,16 +420,17 @@ def download_video_sync():
 
 @app.route("/static/downloads/<path:filename>")
 def serve_file(filename):
-    """Serve downloaded files with proper headers"""
     try:
         decoded_filename = urllib.parse.unquote(filename)
+        response = send_from_directory(
+            DOWNLOAD_FOLDER, 
+            decoded_filename, 
+            as_attachment=True
+        )
         
-        response = send_from_directory(DOWNLOAD_FOLDER, decoded_filename, as_attachment=False)
-        
-        # Add headers for better compatibility
-        response.headers['Content-Type'] = 'video/mp4'
-        response.headers['Accept-Ranges'] = 'bytes'
-        response.headers['Cache-Control'] = 'public, max-age=1800'  # Shorter cache
+        # Add CORS headers
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Content-Disposition'] = f'attachment; filename="{decoded_filename}"'
         
         return response
     except FileNotFoundError:
