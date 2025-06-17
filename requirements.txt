@@ -2,3 +2,4 @@ Flask
 yt-dlp
 gunicorn
 ffmpeg-python
+psutil

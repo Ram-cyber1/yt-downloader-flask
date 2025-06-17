@@ -10,6 +10,8 @@ import time
 from datetime import datetime
 import subprocess
 import sys
+import gc
+import psutil
 
 app = Flask(__name__)
 DOWNLOAD_FOLDER = os.path.join("static", "downloads")
@@ -33,40 +35,116 @@ def sanitize_filename(name):
         name = 'video'
     return name
 
-def clean_up_old_files(limit=3):
-    """Clean up old downloaded files"""
+def get_disk_usage():
+    """Get current disk usage information"""
+    try:
+        usage = psutil.disk_usage('/')
+        return {
+            'total': usage.total,
+            'used': usage.used,
+            'free': usage.free,
+            'percent': (usage.used / usage.total) * 100
+        }
+    except:
+        return None
+
+def aggressive_cleanup():
+    """Aggressively clean up all files and force garbage collection"""
+    try:
+        print("[CLEANUP] Starting aggressive cleanup...")
+        
+        # Get disk usage before cleanup
+        disk_before = get_disk_usage()
+        if disk_before:
+            print(f"[CLEANUP] Disk usage before: {disk_before['percent']:.1f}% ({disk_before['free']/(1024**3):.2f}GB free)")
+        
+        # Remove all files in download folder
+        files = glob.glob(os.path.join(DOWNLOAD_FOLDER, "*"))
+        deleted_count = 0
+        total_size_freed = 0
+        
+        for file_path in files:
+            try:
+                if os.path.isfile(file_path):
+                    file_size = os.path.getsize(file_path)
+                    os.remove(file_path)
+                    deleted_count += 1
+                    total_size_freed += file_size
+                    print(f"[CLEANUP] Deleted: {os.path.basename(file_path)} ({file_size/(1024**2):.1f}MB)")
+            except OSError as e:
+                print(f"[CLEANUP] Failed to delete {file_path}: {e}")
+        
+        # Clean up old status entries
+        old_status_count = len(download_status)
+        download_status.clear()
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # Get disk usage after cleanup
+        disk_after = get_disk_usage()
+        if disk_after:
+            print(f"[CLEANUP] Disk usage after: {disk_after['percent']:.1f}% ({disk_after['free']/(1024**3):.2f}GB free)")
+        
+        print(f"[CLEANUP] Completed: {deleted_count} files deleted, {total_size_freed/(1024**2):.1f}MB freed, {old_status_count} status entries cleared")
+        
+        return {
+            'files_deleted': deleted_count,
+            'size_freed': total_size_freed,
+            'status_cleared': old_status_count
+        }
+        
+    except Exception as e:
+        print(f"[CLEANUP] Error during cleanup: {e}")
+        return {'error': str(e)}
+
+def clean_up_old_files(limit=1):
+    """Clean up old downloaded files - called only when new download is requested"""
     try:
         files = glob.glob(os.path.join(DOWNLOAD_FOLDER, "*"))
         files = [f for f in files if os.path.isfile(f)]
+        
         if len(files) >= limit:
             # Sort by creation time (oldest first)
             files.sort(key=lambda x: os.path.getctime(x))
-            # Delete oldest files, keep only (limit-1)
-            for f in files[:len(files) - (limit - 1)]:
+            # Delete old files to make room for new download
+            files_to_delete = files[:-1] if limit > 0 else files
+            for f in files_to_delete:
                 try:
+                    file_size = os.path.getsize(f)
                     os.remove(f)
-                except OSError:
-                    pass  # File might already be deleted
-    except Exception:
-        pass  # Ignore cleanup errors
+                    print(f"[CLEANUP] Deleted old file: {os.path.basename(f)} ({file_size/(1024**2):.1f}MB)")
+                except OSError as e:
+                    print(f"[CLEANUP] Failed to delete {f}: {e}")
+        
+        # Force garbage collection after cleanup
+        gc.collect()
+        
+    except Exception as e:
+        print(f"[CLEANUP] Error in cleanup: {e}")
 
 def download_video_async(url, unique_id, download_id):
-    """Async download function to prevent worker timeout"""
+    """Async download function - cleanup is done before calling this function"""
     try:
         download_status[download_id] = {
             'status': 'downloading',
             'progress': 0,
             'filename': None,
             'title': None,
-            'error': None
+            'error': None,
+            'timestamp': time.time()
         }
         
-        # Clean up old files before downloading
-        clean_up_old_files(limit=3)
+        print(f"[DOWNLOAD] Starting download for ID: {download_id}")
         
-        # More robust yt-dlp options
+        # Check disk space (cleanup already done in the API endpoint)
+        disk_info = get_disk_usage()
+        if disk_info and disk_info['percent'] > 85:
+            raise Exception(f"Insufficient disk space: {disk_info['percent']:.1f}% used")
+        
+        # More restrictive yt-dlp options for resource conservation
         ydl_opts = {
-            'format': 'best[height<=480]/best[height<=720]/best',  # Lower quality for faster download
+            'format': 'worst[height<=360]/worst[height<=480]/worst',  # Very low quality
             'merge_output_format': 'mp4',
             'outtmpl': os.path.join(DOWNLOAD_FOLDER, f'{unique_id}_%(title)s.%(ext)s'),
             'quiet': True,
@@ -75,22 +153,20 @@ def download_video_async(url, unique_id, download_id):
             'ignoreerrors': True,
             'no_check_certificate': True,
             'prefer_insecure': True,
-            'socket_timeout': 30,
-            'retries': 3,
-            'fragment_retries': 3,
-            'http_chunk_size': 10485760,  # 10MB chunks
+            'socket_timeout': 20,
+            'retries': 2,
+            'fragment_retries': 2,
+            'http_chunk_size': 5242880,  # 5MB chunks (smaller)
+            'concurrent_fragment_downloads': 1,  # Reduce concurrent downloads
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['android', 'web'],
+                    'player_client': ['android'],
                     'player_skip': ['configs', 'webpage'],
                     'skip': ['dash', 'hls']
                 }
             },
             'http_headers': {
                 'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-us,en;q=0.5',
-                'Sec-Fetch-Mode': 'navigate',
             }
         }
         
@@ -104,20 +180,33 @@ def download_video_async(url, unique_id, download_id):
                 try:
                     percent = d.get('_percent_str', '0%').replace('%', '')
                     download_status[download_id]['progress'] = float(percent)
+                    
+                    # Log progress periodically
+                    if int(float(percent)) % 25 == 0:
+                        print(f"[DOWNLOAD] Progress: {percent}%")
+                        
                 except:
                     pass
             elif d['status'] == 'finished':
                 download_status[download_id]['progress'] = 100
+                print("[DOWNLOAD] Download finished, processing...")
         
         ydl_opts['progress_hooks'] = [progress_hook]
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             # Extract info first
+            print("[DOWNLOAD] Extracting video info...")
             info = ydl.extract_info(url, download=False)
             title = info.get('title', 'video')
+            duration = info.get('duration', 0)
+            
+            # Limit duration to prevent large downloads
+            if duration and duration > 600:  # 10 minutes max
+                raise Exception(f"Video too long ({duration}s). Maximum allowed: 600s")
             
             # Update status
             download_status[download_id]['title'] = title
+            print(f"[DOWNLOAD] Downloading: {title} ({duration}s)")
             
             # Download the video
             ydl.download([url])
@@ -129,13 +218,20 @@ def download_video_async(url, unique_id, download_id):
             if downloaded_files:
                 actual_file = downloaded_files[0]
                 actual_filename = os.path.basename(actual_file)
+                file_size = os.path.getsize(actual_file)
+                
+                print(f"[DOWNLOAD] Download completed: {actual_filename} ({file_size/(1024**2):.1f}MB)")
                 
                 download_status[download_id].update({
                     'status': 'completed',
                     'progress': 100,
                     'filename': actual_filename,
-                    'title': title
+                    'title': title,
+                    'file_size': file_size
                 })
+                
+                print(f"[DOWNLOAD] Successfully completed: {actual_filename}")
+                
             else:
                 download_status[download_id].update({
                     'status': 'error',
@@ -152,19 +248,26 @@ def download_video_async(url, unique_id, download_id):
         elif 'Private video' in error_msg:
             error_msg = 'Video is private'
         
+        print(f"[DOWNLOAD] yt-dlp error: {error_msg}")
         download_status[download_id].update({
             'status': 'error',
             'error': error_msg
         })
     except Exception as e:
+        print(f"[DOWNLOAD] General error: {str(e)}")
         download_status[download_id].update({
             'status': 'error',
             'error': f'Download failed: {str(e)}'
         })
+    finally:
+        # Light garbage collection only
+        gc.collect()
 
 @app.route("/")
 def home():
-    return "🎬 Lucid Video API by Ram Sharma is running!"
+    disk_info = get_disk_usage()
+    disk_text = f" | Disk: {disk_info['percent']:.1f}% used" if disk_info else ""
+    return f"🎬 Lucid Video API by Ram Sharma is running!{disk_text}"
 
 @app.route("/api/download", methods=["POST"])
 def download_video():
@@ -174,9 +277,22 @@ def download_video():
     if not url:
         return jsonify({"error": "No URL provided."}), 400
     
+    # Perform aggressive cleanup before starting any new download
+    print("[API] New download request received, performing cleanup...")
+    cleanup_result = aggressive_cleanup()
+    
+    # Check disk space after cleanup
+    disk_info = get_disk_usage()
+    if disk_info and disk_info['percent'] > 90:
+        return jsonify({
+            "error": f"Insufficient disk space: {disk_info['percent']:.1f}% used. Please try again later."
+        }), 507
+    
     # Generate unique IDs
     unique_id = str(uuid.uuid4())[:8]
     download_id = str(uuid.uuid4())
+    
+    print(f"[API] Starting async download with ID: {download_id}")
     
     # Start async download
     thread = threading.Thread(
@@ -190,7 +306,8 @@ def download_video():
         "success": True,
         "message": "Download started",
         "download_id": download_id,
-        "status_url": f"{request.host_url}api/status/{download_id}"
+        "status_url": f"{request.host_url}api/status/{download_id}",
+        "cleanup_performed": cleanup_result
     })
 
 @app.route("/api/status/<download_id>", methods=["GET"])
@@ -206,11 +323,16 @@ def get_download_status(download_id):
         encoded_filename = urllib.parse.quote(status['filename'], safe='')
         status['download_url'] = f"{request.host_url}static/downloads/{encoded_filename}"
     
+    # Add disk usage info
+    disk_info = get_disk_usage()
+    if disk_info:
+        status['disk_usage'] = f"{disk_info['percent']:.1f}%"
+    
     return jsonify(status)
 
 @app.route("/api/download-sync", methods=["POST"])
 def download_video_sync():
-    """Synchronous download for smaller videos - use with caution"""
+    """Synchronous download for very small videos only"""
     data = request.get_json()
     url = data.get("url")
     
@@ -218,15 +340,19 @@ def download_video_sync():
         return jsonify({"error": "No URL provided."}), 400
     
     try:
+        # Aggressive cleanup ONLY when new sync download is requested
+        print("[SYNC] Sync download request, performing cleanup...")
+        aggressive_cleanup()
+        
         unique_id = str(uuid.uuid4())[:8]
         
         # Very restrictive options for sync download
         ydl_opts = {
-            'format': 'worst[height<=360]/worst',  # Very low quality for speed
+            'format': 'worst[height<=240]/worst',  # Extremely low quality
             'outtmpl': os.path.join(DOWNLOAD_FOLDER, f'{unique_id}_%(title)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
-            'socket_timeout': 15,
+            'socket_timeout': 10,
             'retries': 1,
             'extractor_args': {
                 'youtube': {
@@ -246,12 +372,13 @@ def download_video_sync():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             
-            # Check duration - only allow short videos for sync download
+            # Check duration - only allow very short videos for sync download
             duration = info.get('duration', 0)
-            if duration and duration > 300:  # 5 minutes
+            if duration and duration > 180:  # 3 minutes max for sync
                 return jsonify({
                     "error": "Video too long for sync download. Use async endpoint instead.",
-                    "duration": duration
+                    "duration": duration,
+                    "max_duration": 180
                 }), 400
             
             title = info.get('title', 'video')
@@ -264,13 +391,18 @@ def download_video_sync():
             if downloaded_files:
                 actual_file = downloaded_files[0]
                 actual_filename = os.path.basename(actual_file)
+                file_size = os.path.getsize(actual_file)
                 encoded_filename = urllib.parse.quote(actual_filename, safe='')
+                
+                # No immediate cleanup - cleanup happens on next request
+                print(f"[SYNC] Download completed successfully: {actual_filename}")
                 
                 return jsonify({
                     "success": True,
                     "message": "Video downloaded successfully!",
                     "filename": actual_filename,
                     "title": title,
+                    "file_size": file_size,
                     "download_url": f"{request.host_url}static/downloads/{encoded_filename}"
                 })
             else:
@@ -278,6 +410,8 @@ def download_video_sync():
                 
     except Exception as e:
         return jsonify({"error": f"Download failed: {str(e)}"}), 500
+    finally:
+        gc.collect()
 
 @app.route("/static/downloads/<path:filename>")
 def serve_file(filename):
@@ -290,7 +424,7 @@ def serve_file(filename):
         # Add headers for better compatibility
         response.headers['Content-Type'] = 'video/mp4'
         response.headers['Accept-Ranges'] = 'bytes'
-        response.headers['Cache-Control'] = 'public, max-age=3600'
+        response.headers['Cache-Control'] = 'public, max-age=1800'  # Shorter cache
         
         return response
     except FileNotFoundError:
@@ -304,21 +438,30 @@ def list_files():
         files = [f for f in files if os.path.isfile(f)]
         
         file_list = []
+        total_size = 0
         for file_path in files:
             filename = os.path.basename(file_path)
+            file_size = os.path.getsize(file_path)
+            total_size += file_size
             encoded_filename = urllib.parse.quote(filename, safe='')
             file_info = {
                 "filename": filename,
-                "size": os.path.getsize(file_path),
+                "size": file_size,
+                "size_mb": round(file_size / (1024**2), 2),
                 "created": datetime.fromtimestamp(os.path.getctime(file_path)).isoformat(),
                 "download_url": f"{request.host_url}static/downloads/{encoded_filename}"
             }
             file_list.append(file_info)
         
+        # Get disk usage
+        disk_info = get_disk_usage()
+        
         return jsonify({
             "success": True,
             "files": file_list,
-            "count": len(file_list)
+            "count": len(file_list),
+            "total_size_mb": round(total_size / (1024**2), 2),
+            "disk_usage": disk_info
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -327,22 +470,31 @@ def list_files():
 def cleanup_files():
     """Manual cleanup endpoint"""
     try:
-        files = glob.glob(os.path.join(DOWNLOAD_FOLDER, "*"))
-        deleted_count = 0
-        
-        for file_path in files:
-            try:
-                os.remove(file_path)
-                deleted_count += 1
-            except OSError:
-                pass
-        
+        result = aggressive_cleanup()
         return jsonify({
             "success": True,
-            "message": f"Deleted {deleted_count} files"
+            "message": f"Cleanup completed: {result.get('files_deleted', 0)} files deleted",
+            "details": result
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/health", methods=["GET"])
+def health_check():
+    """Health check endpoint with system info"""
+    try:
+        disk_info = get_disk_usage()
+        file_count = len([f for f in glob.glob(os.path.join(DOWNLOAD_FOLDER, "*")) if os.path.isfile(f)])
+        
+        return jsonify({
+            "status": "healthy",
+            "disk_usage": disk_info,
+            "files_count": file_count,
+            "download_status_count": len(download_status),
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 # Clean up old download status entries periodically
 def cleanup_status():
@@ -353,17 +505,25 @@ def cleanup_status():
             to_remove = []
             
             for download_id, status in download_status.items():
-                # Remove status entries older than 1 hour
-                if current_time - status.get('timestamp', current_time) > 3600:
+                # Remove status entries older than 30 minutes (shorter)
+                if current_time - status.get('timestamp', current_time) > 1800:
                     to_remove.append(download_id)
             
             for download_id in to_remove:
                 download_status.pop(download_id, None)
+            
+            if to_remove:
+                print(f"[CLEANUP] Removed {len(to_remove)} old status entries")
+            
+            # Periodic aggressive cleanup every hour
+            if int(current_time) % 3600 < 60:  # Once per hour
+                print("[CLEANUP] Performing scheduled cleanup...")
+                aggressive_cleanup()
                 
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[CLEANUP] Error in status cleanup: {e}")
         
-        time.sleep(1800)  # Run every 30 minutes
+        time.sleep(600)  # Run every 10 minutes (more frequent)
 
 # Start cleanup thread
 cleanup_thread = threading.Thread(target=cleanup_status)
@@ -371,4 +531,7 @@ cleanup_thread.daemon = True
 cleanup_thread.start()
 
 if __name__ == "__main__":
+    print("[STARTUP] Starting Flask app with aggressive cleanup...")
+    # Initial cleanup on startup
+    aggressive_cleanup()
     app.run(debug=True, host="0.0.0.0", port=5000)
