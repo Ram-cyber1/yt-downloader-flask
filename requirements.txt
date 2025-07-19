@@ -4,3 +4,4 @@ gunicorn
 ffmpeg-python
 psutil
 flask-cors
+yt-dlp[impersonate]
