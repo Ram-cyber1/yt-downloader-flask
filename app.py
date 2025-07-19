@@ -165,13 +165,14 @@ def download_video_async(url, unique_id, download_id):
             'fragment_retries': 2,
             'http_chunk_size': 5242880,  # 5MB chunks (smaller)
             'concurrent_fragment_downloads': 1,  # Reduce concurrent downloads
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android'],
-                    'player_skip': ['configs', 'webpage'],
-                    'skip': ['dash', 'hls']
-                }
-            },
+'extractor_args': {
+    'generic': ['impersonate'],
+    'youtube': {
+        'player_client': ['android'],
+        'skip': ['dash', 'hls']
+    }
+}
+,
             'http_headers': {
                 'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip',
             }
@@ -347,12 +348,14 @@ def handle_sync_download(url, info, title, duration, cleanup_result):
             'no_warnings': True,
             'socket_timeout': 15,
             'retries': 1,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android'],
-                    'skip': ['dash', 'hls']
-                }
-            },
+    'extractor_args': {
+    'generic': ['impersonate'],
+    'youtube': {
+        'player_client': ['android'],
+        'skip': ['dash', 'hls']
+    }
+}
+,
             'http_headers': {
                 'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip'
             }
@@ -477,12 +480,14 @@ def download_video_sync():
             'no_warnings': True,
             'socket_timeout': 10,
             'retries': 1,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android'],
-                    'skip': ['dash', 'hls']
-                }
-            },
+        'extractor_args': {
+    'generic': ['impersonate'],
+    'youtube': {
+        'player_client': ['android'],
+        'skip': ['dash', 'hls']
+    }
+}
+,
             'http_headers': {
                 'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip'
             }
